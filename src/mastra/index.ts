@@ -1,8 +1,8 @@
 import { Mastra } from '@mastra/core';
-import { eddifyAgent } from './agents/eddify.js';
+import { GoodshepherdModelGateway } from '../gateway/GoodshepherdModelGateway.js';
 
 export const mastra = new Mastra({
-  agents: {
-    eddify: eddifyAgent,
+  gateways: {
+    goodshepherd: new GoodshepherdModelGateway(),
   },
 });
