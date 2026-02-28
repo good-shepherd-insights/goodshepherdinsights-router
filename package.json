@@ -1,7 +1,7 @@
 {
-  "name": "eddify-agent",
+  "name": "goodshepherd-model-gateway",
   "version": "1.0.0",
-  "description": "Mastra-powered Eddify AI agent server using OpenRouter",
+  "description": "Mastra-based model gateway exposing OpenAI-compatible API layer",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -10,7 +10,7 @@
     "build:start": "npm run build && node dist/index.js"
   },
   "dependencies": {
-    "@openrouter/ai-sdk-provider": "^2.2.3",
+    "@ai-sdk/openai-compatible-v5": "^1.0.0",
     "@hono/node-server": "^1.13.7",
     "@mastra/core": "^0.7.0",
     "dotenv": "^16.4.7",
