@@ -40,7 +40,7 @@ The `Agent` constructor accepts an `instructions` string — this becomes the sy
 const agent = new Agent({
   name: 'eddify',
   instructions: `${soulContent}\n\n${identityContent}`,
-  model: openai('gpt-4o'),  // or anthropic('claude-3-5-sonnet')
+  model: openrouter('openai/gpt-4o'),  // or openrouter('anthropic/claude-3-5-sonnet')
   tools: { ... },
   memory: new Memory({ ... })
 });
@@ -67,7 +67,7 @@ graph TD
     EddifyAgent --> Instructions[System Instructions]
     Instructions --> SOUL[SOUL.md content]
     Instructions --> IDENTITY[IDENTITY.md content]
-    EddifyAgent --> LLM[LLM Provider - OpenAI/Anthropic]
+    EddifyAgent --> LLM[LLM Provider - OpenRouter]
     EddifyAgent --> Memory[Memory - LibSQL/Upstash]
 ```
 
@@ -100,7 +100,7 @@ graph TD
 ```bash
 mkdir -p src/mastra/agents src/mastra/instructions
 npm init -y
-npm install @mastra/core @ai-sdk/openai hono @hono/node-server
+npm install @mastra/core @ai-sdk/openrouter hono @hono/node-server
 npm install -D typescript tsx @types/node
 ```
 
@@ -135,14 +135,14 @@ export const IDENTITY_INSTRUCTIONS = `
 **`src/mastra/agents/eddify.ts`**
 ```typescript
 import { Agent } from '@mastra/core/agent';
-import { openai } from '@ai-sdk/openai';
+import { openrouter } from '@ai-sdk/openrouter';
 import { SOUL_INSTRUCTIONS } from '../instructions/soul';
 import { IDENTITY_INSTRUCTIONS } from '../instructions/identity';
 
 export const eddifyAgent = new Agent({
   name: 'eddify',
   instructions: `${SOUL_INSTRUCTIONS}\n\n---\n\n${IDENTITY_INSTRUCTIONS}`,
-  model: openai('gpt-4o'),
+  model: openrouter('openai/gpt-4o'),
 });
 ```
 
@@ -242,9 +242,7 @@ curl -X POST http://localhost:3000/api/agents/eddify/generate \
 ## Environment Variables
 
 ```env
-OPENAI_API_KEY=sk-...
-# OR
-ANTHROPIC_API_KEY=sk-ant-...
+OPENROUTER_API_KEY=sk-or-...
 
 PORT=3000
 ```
@@ -263,7 +261,7 @@ Using `mastra.getRouter()` (Hono-based) gives us all the standard Mastra endpoin
 The agent is registered as `eddify` in the Mastra instance. This becomes the URL segment: `/api/agents/eddify/...`
 
 ### 4. Model Choice
-Default to `openai('gpt-4o')` — can be swapped to `anthropic('claude-3-5-sonnet-20241022')` by changing one line in `eddify.ts`.
+Default to `openrouter('openai/gpt-4o')` — can be swapped to any model available on OpenRouter (e.g. `openrouter('anthropic/claude-3-5-sonnet')`, `openrouter('google/gemini-2.0-flash')`) by changing one line in `eddify.ts`. OpenRouter provides a unified API key (`OPENROUTER_API_KEY`) for all providers.
 
 ### 5. Memory (Optional Enhancement)
 Mastra supports `@mastra/memory` with LibSQL (local SQLite) or Upstash (Redis). Adding memory enables conversation threads. This is optional for the initial implementation.
@@ -291,7 +289,7 @@ const memory = new Memory({
 export const eddifyAgent = new Agent({
   name: 'eddify',
   instructions: `${SOUL_INSTRUCTIONS}\n\n---\n\n${IDENTITY_INSTRUCTIONS}`,
-  model: openai('gpt-4o'),
+  model: openrouter('openai/gpt-4o'),
   memory,
 });
 ```
