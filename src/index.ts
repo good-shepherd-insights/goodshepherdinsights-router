@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { generateText, streamText } from 'ai';
 import { mastra } from './mastra/index.js';
 import { GoodshepherdModelGateway } from './gateway/GoodshepherdModelGateway.js';
 
@@ -14,7 +15,7 @@ const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gpt-4o';
  */
 function authenticate(c: any, next: () => Promise<void>) {
   const authHeader = c.req.header('authorization');
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return c.json({
       error: {
@@ -68,29 +69,36 @@ app.post('/v1/chat/completions', authenticate, async (c) => {
       }, 400);
     }
 
-    // Get the language model from the gateway
-    const languageModel = await gateway.resolveLanguageModel(model, process.env as Record<string, string>);
+    // Get the language model provider from the gateway
+    const provider = gateway.resolveLanguageModel(model, process.env as Record<string, string>);
+    const actualModelId = model.split('/').pop() || model;
+    const languageModel = provider(actualModelId);
 
     if (stream) {
       // Handle streaming response
-      const streamResult = await languageModel.stream({
+      const streamResult = await streamText({
+        model: languageModel,
         messages: messages as any,
         temperature,
-        max_tokens,
+        maxTokens: max_tokens,
         ...rest,
       });
 
-      return c.text('', 200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
+      // Return streaming response
+      return new Response(streamResult.toDataStream(), {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
       });
     } else {
       // Handle non-streaming response
-      const result = await languageModel.generate({
+      const result = await generateText({
+        model: languageModel,
         messages: messages as any,
         temperature,
-        max_tokens,
+        maxTokens: max_tokens,
         ...rest,
       });
 
@@ -116,7 +124,7 @@ app.post('/v1/chat/completions', authenticate, async (c) => {
     }
   } catch (error: any) {
     console.error('Error processing request:', error);
-    
+
     return c.json({
       error: {
         message: error.message || 'Internal server error',
@@ -138,7 +146,7 @@ app.get('/health', (c) => {
 /**
  * Gateway info endpoint
  */
-app.get('/v1/models', (c) => {
+app.get('/v1/models', authenticate, (c) => {
   const providers = gateway.fetchProviders();
   return c.json({
     object: 'list',
@@ -151,18 +159,11 @@ app.get('/v1/models', (c) => {
   });
 });
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// Start the server
+const port = parseInt(process.env.PORT || '3000');
+serve({
+  fetch: app.fetch,
+  port,
+});
 
-serve(
-  {
-    fetch: app.fetch,
-    port: PORT,
-  },
-  (info) => {
-    console.log(`🤖 Good Shepherd Model Gateway running on http://localhost:${info.port}`);
-    console.log(`\nAvailable endpoints:`);
-    console.log(`  GET  http://localhost:${info.port}/health`);
-    console.log(`  GET  http://localhost:${info.port}/v1/models`);
-    console.log(`  POST http://localhost:${info.port}/v1/chat/completions\n`);
-  },
-);
+console.log(`🚀 Goodshepherd Model Gateway running on port ${port}`);

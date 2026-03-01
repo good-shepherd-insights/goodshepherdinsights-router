@@ -1,5 +1,4 @@
-import { MastraModelGateway, LanguageModelV2 } from '@mastra/core/llm';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+import { createOpenAICompatible, OpenAICompatibleProvider } from '@ai-sdk/openai-compatible';
 
 /**
  * Provider configuration interface for the Goodshepherd Model Gateway.
@@ -15,16 +14,14 @@ export interface ProviderConfig {
 }
 
 /**
- * GoodshepherdModelGateway - A Mastra-based model gateway that exposes
+ * GoodshepherdModelGateway - A model gateway that exposes
  * an OpenAI-compatible API layer for both local and hosted models.
- * 
+ *
  * This gateway supports:
  * - Local models (vLLM, Ollama, TGI, custom model servers)
  * - Hosted models (OpenAI, OpenRouter, and any OpenAI-compatible provider)
- * 
- * @extends MastraModelGateway
  */
-export class GoodshepherdModelGateway extends MastraModelGateway {
+export class GoodshepherdModelGateway {
   /**
    * Gateway identifier
    */
@@ -99,17 +96,17 @@ export class GoodshepherdModelGateway extends MastraModelGateway {
   }
 
   /**
-   * Resolves a LanguageModelV2 instance for the given model ID.
-   * Uses createOpenAICompatible to create an OpenAI-compatible language model.
-   * 
+   * Resolves an OpenAICompatibleProvider for the given model ID.
+   * Uses createOpenAICompatible to create an OpenAI-compatible language model provider.
+   *
    * @param modelId - The model identifier
    * @param envVars - Environment variables for configuration
-   * @returns Promise<LanguageModelV2> - The resolved language model instance
+   * @returns OpenAICompatibleProvider - The resolved language model provider
    */
-  async resolveLanguageModel(
+  resolveLanguageModel(
     modelId: string,
     envVars: Record<string, string>
-  ): Promise<LanguageModelV2> {
+  ): OpenAICompatibleProvider<string, string, string, string> {
     const providers = this.fetchProviders();
     
     // Determine which provider to use based on model ID prefix
@@ -137,5 +134,3 @@ export class GoodshepherdModelGateway extends MastraModelGateway {
     });
   }
 }
-
-export { ProviderConfig };
