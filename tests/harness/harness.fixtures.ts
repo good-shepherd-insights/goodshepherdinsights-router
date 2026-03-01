@@ -15,7 +15,7 @@ export const HARNESS_TEST_CONFIG = {
         GENERAL: 'Hello, what can you help me with today?',
     },
     CONTENT_MARKERS: {
-        PERSONA: 'You are Eddify',
+        PERSONA: '- **Name:** Eddify',
         DEV_DIRECTIVE: '[ DIRECTIVE: DEVELOPMENT ]',
         RES_DIRECTIVE: '[ DIRECTIVE: RESEARCH ]',
         GEN_DIRECTIVE: '[ DIRECTIVE: GENERAL ASSISTANT ]',

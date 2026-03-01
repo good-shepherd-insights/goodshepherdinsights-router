@@ -16,7 +16,7 @@ export async function initMastra() {
     apiKey: process.env.KILOCODE_API_KEY || 'MISSING_API_KEY'
   });
 
-  const model = provider('giga-potato');
+  const model = provider('minimax/minimax-m2.5:free');
 
   eddifyAgentInstance = new Agent({
     name: 'eddify-alpha',

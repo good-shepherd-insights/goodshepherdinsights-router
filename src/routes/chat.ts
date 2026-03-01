@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { authenticate } from '../middleware/index.js';
 import { getEddifyAgent } from '../mastra/index.js';
 import { harnessRouter } from '../mastra/harness/index.js';
+import { monitor } from '../monitor/monitor.js';
 
 const chatRoutes = new Hono();
 const DEFAULT_MODEL = 'eddify-alpha';
@@ -53,6 +54,8 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
         } else {
             const result = await getEddifyAgent().generate(enrichedPrompt);
             const usage: any = result.usage;
+
+            monitor.agentOutput(result.text || '', usage);
 
             return c.json({
                 id: `chatcmpl-${Date.now()}`,

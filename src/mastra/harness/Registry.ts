@@ -8,6 +8,7 @@
  */
 import { IHarnessStrategy } from './types.js';
 import { DevelopmentStrategy, ResearchStrategy, DefaultStrategy } from './strategies.js';
+import { monitor } from '../../monitor/monitor.js';
 
 export class HarnessRegistry {
     /**
@@ -31,7 +32,9 @@ export class HarnessRegistry {
     public routePayload(rawPrompt: string): string {
         for (const strategy of this.strategies) {
             if (strategy.canHandle(rawPrompt)) {
-                return strategy.apply(rawPrompt);
+                const enrichedPrompt = strategy.apply(rawPrompt);
+                monitor.harnessInput(strategy.id, enrichedPrompt);
+                return enrichedPrompt;
             }
         }
 
