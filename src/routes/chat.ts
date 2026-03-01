@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { authenticate } from '../middleware/index.js';
 import { getEddifyAgent } from '../mastra/index.js';
+import { harnessRouter } from '../mastra/harness/index.js';
 
 const chatRoutes = new Hono();
 const DEFAULT_MODEL = 'eddify-alpha';
@@ -34,10 +35,14 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
             }, 404);
         }
 
-        const prompt = messages[messages.length - 1]?.content || '';
+        // Extract raw user query from the final message in the conversation
+        const rawPrompt = messages[messages.length - 1]?.content || '';
+
+        // Classify intent and delegate to the appropriate strategy harness
+        const enrichedPrompt = harnessRouter.routePayload(rawPrompt);
 
         if (stream) {
-            const streamResult = await getEddifyAgent().stream(prompt);
+            const streamResult = await getEddifyAgent().stream(enrichedPrompt);
             return new Response(streamResult.textStream as any, {
                 headers: {
                     'Content-Type': 'text/event-stream',
@@ -46,7 +51,7 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
                 },
             });
         } else {
-            const result = await getEddifyAgent().generate(prompt);
+            const result = await getEddifyAgent().generate(enrichedPrompt);
             const usage: any = result.usage;
 
             return c.json({
