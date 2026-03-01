@@ -1,141 +1,64 @@
-import { MastraModelGateway, LanguageModelV2 } from '@mastra/core/llm';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible-v5';
+import { MastraModelGateway, ProviderConfig, GatewayLanguageModel } from '@mastra/core/llm';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { PROVIDER_REGISTRY } from './providers';
 
-/**
- * Provider configuration interface for the Goodshepherd Model Gateway.
- * Defines the configuration for each model provider.
- */
-export interface ProviderConfig {
-  /** Base URL for the OpenAI-compatible API endpoint */
-  baseURL: string;
-  /** API key for authentication */
-  apiKey?: string;
-  /** Optional provider-specific headers */
-  headers?: Record<string, string>;
-}
-
-/**
- * GoodshepherdModelGateway - A Mastra-based model gateway that exposes
- * an OpenAI-compatible API layer for both local and hosted models.
- * 
- * This gateway supports:
- * - Local models (vLLM, Ollama, TGI, custom model servers)
- * - Hosted models (OpenAI, OpenRouter, and any OpenAI-compatible provider)
- * 
- * @extends MastraModelGateway
- */
 export class GoodshepherdModelGateway extends MastraModelGateway {
-  /**
-   * Gateway identifier
-   */
-  id = 'goodshepherd';
+  readonly id = 'goodshepherd';
+  readonly name = 'Good Shepherd Insights Router';
 
-  /**
-   * Gateway display name
-   */
-  name = 'Good Shepherd Insights Router';
-
-  /**
-   * Fetches the available provider configurations.
-   * Supports both local and hosted model providers.
-   * 
-   * @returns Record<string, ProviderConfig> - Map of provider names to their configurations
-   */
-  fetchProviders(): Record<string, ProviderConfig> {
+  async fetchProviders(): Promise<Record<string, ProviderConfig>> {
     return {
-      // Local model servers
+      kilocode: {
+        name: PROVIDER_REGISTRY.KILOCODE.name,
+        url: PROVIDER_REGISTRY.KILOCODE.baseURL,
+        apiKeyEnvVar: PROVIDER_REGISTRY.KILOCODE.envKey,
+        models: ['*'],
+        gateway: this.id,
+      },
       local: {
-        baseURL: process.env.MODEL_BASE_URL || 'http://localhost:8000/v1',
-        apiKey: process.env.LOCAL_MODEL_API_KEY || 'local-key',
-      },
-      // OpenAI
-      openai: {
-        baseURL: 'https://api.openai.com/v1',
-        apiKey: process.env.OPENAI_API_KEY,
-      },
-      // OpenRouter
-      openrouter: {
-        baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: process.env.OPENROUTER_API_KEY,
-      },
-      // Anthropic
-      anthropic: {
-        baseURL: 'https://api.anthropic.com/v1',
-        apiKey: process.env.ANTHROPIC_API_KEY,
-        headers: {
-          'anthropic-version': '2023-06-01',
-        },
-      },
+        name: PROVIDER_REGISTRY.LOCAL.name,
+        url: PROVIDER_REGISTRY.LOCAL.baseURL,
+        apiKeyEnvVar: PROVIDER_REGISTRY.LOCAL.envKey,
+        models: ['*'],
+        gateway: this.id,
+      }
     };
   }
 
-  /**
-   * Builds the full URL for a given model ID and provider.
-   * 
-   * @param modelId - The model identifier (e.g., 'gpt-4o', 'claude-3-5-sonnet')
-   * @param envVars - Environment variables for configuration
-   * @returns string - The complete URL for the model API endpoint
-   */
-  buildUrl(modelId: string, envVars: Record<string, string>): string {
-    const providers = this.fetchProviders();
-    
-    // Determine which provider to use based on model ID prefix
-    let providerKey = 'local'; // Default to local
-    if (modelId.startsWith('openai/') || modelId.startsWith('gpt-') || modelId.startsWith('o1-')) {
-      providerKey = 'openai';
-    } else if (modelId.startsWith('anthropic/') || modelId.startsWith('claude-')) {
-      providerKey = 'anthropic';
-    } else if (modelId.startsWith('openrouter/')) {
-      providerKey = 'openrouter';
-    }
-
-    const provider = providers[providerKey];
-    const baseURL = envVars.MODEL_BASE_URL || provider.baseURL;
-    
-    // Remove any model prefix for the actual model name
-    const actualModelId = modelId.split('/').pop() || modelId;
-    
-    return `${baseURL}/chat/completions`;
+  buildUrl(modelId: string, envVars: Record<string, string>): string | undefined {
+    const isLocal = modelId.startsWith('local:');
+    const provider = isLocal ? PROVIDER_REGISTRY.LOCAL : PROVIDER_REGISTRY.KILOCODE;
+    return envVars[provider.baseURL] || provider.baseURL; // Simplified for this example
   }
 
-  /**
-   * Resolves a LanguageModelV2 instance for the given model ID.
-   * Uses createOpenAICompatible to create an OpenAI-compatible language model.
-   * 
-   * @param modelId - The model identifier
-   * @param envVars - Environment variables for configuration
-   * @returns Promise<LanguageModelV2> - The resolved language model instance
-   */
-  async resolveLanguageModel(
-    modelId: string,
-    envVars: Record<string, string>
-  ): Promise<LanguageModelV2> {
-    const providers = this.fetchProviders();
-    
-    // Determine which provider to use based on model ID prefix
-    let providerKey = 'local'; // Default to local
-    if (modelId.startsWith('openai/') || modelId.startsWith('gpt-') || modelId.startsWith('o1-')) {
-      providerKey = 'openai';
-    } else if (modelId.startsWith('anthropic/') || modelId.startsWith('claude-')) {
-      providerKey = 'anthropic';
-    } else if (modelId.startsWith('openrouter/')) {
-      providerKey = 'openrouter';
+  async getApiKey(modelId: string): Promise<string> {
+    const isLocal = modelId.startsWith('local:');
+    const provider = isLocal ? PROVIDER_REGISTRY.LOCAL : PROVIDER_REGISTRY.KILOCODE;
+    return process.env[provider.envKey] || '';
+  }
+
+  async resolveLanguageModel(args: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+    headers?: Record<string, string>;
+  }): Promise<GatewayLanguageModel> {
+    const { modelId, apiKey } = args;
+    const isLocal = modelId.startsWith('local:');
+    const provider = isLocal ? PROVIDER_REGISTRY.LOCAL : PROVIDER_REGISTRY.KILOCODE;
+    const actualModelName = modelId.includes(':') && !isLocal ? modelId.split(':')[1] : modelId;
+
+    if (!apiKey) {
+      throw new Error(`Configuration Missing: API Key is required for model ${modelId}.`);
     }
 
-    const provider = providers[providerKey];
-    const baseURL = envVars.MODEL_BASE_URL || provider.baseURL;
-    const apiKey = envVars[`${providerKey.toUpperCase()}_API_KEY`] || provider.apiKey || '';
-    
-    // Remove any model prefix for the actual model name
-    const actualModelId = modelId.split('/').pop() || modelId;
-
-    return createOpenAICompatible({
-      baseURL,
+    const providerInstance = createOpenAICompatible({
+      name: provider.name,
+      baseURL: provider.baseURL,
       apiKey,
-      name: actualModelId,
-      headers: provider.headers,
+      headers: args.headers,
     });
+
+    return providerInstance(actualModelName) as any as GatewayLanguageModel;
   }
 }
-
-export { ProviderConfig };
