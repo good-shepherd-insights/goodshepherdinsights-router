@@ -2,6 +2,8 @@ import { Mastra } from '@mastra/core';
 import { Agent } from '@mastra/core/agent';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { GoodshepherdModelGateway } from '../gateway/GoodshepherdModelGateway.js';
+import { integrityProcessor } from './processors/integrity.processor.js';
+import { piiDetector, moderationProcessor } from './processors/native.processors.js';
 
 // The singleton gateway used everywhere
 export const gateway = new GoodshepherdModelGateway();
@@ -23,6 +25,11 @@ export async function initMastra() {
     id: 'eddify-alpha-agent',
     instructions: 'You are Eddify, an advanced reasoning assistant powered by Good Shepherd Insights.',
     model: model as any, // Cast away strict Vercel AI SDK types vs Mastra expected types
+    outputProcessors: [
+      integrityProcessor,    // 1. Audit + rewrite for honesty, effort, accountability
+      piiDetector,           // 2. Redact PII to placeholders from cleaned output
+      moderationProcessor,   // 3. Block harmful content last
+    ] as any,
   });
 
   mastraInstance = new Mastra({

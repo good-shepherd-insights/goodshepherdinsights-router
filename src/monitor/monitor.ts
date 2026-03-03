@@ -47,4 +47,18 @@ export const monitor = {
         console.log(`│  tokens  →  prompt: ${p}  |  completion: ${c}  |  total: ${t}`);
         console.log(`└${line()}\n`);
     },
+
+    /**
+     * Logs the outcome of a processor in the output guardrail chain.
+     */
+    processorEvent(id: string, action: 'PASSED' | 'REWRITTEN' | 'BLOCKED', detail?: string): void {
+        if (!IS_DEBUG) return;
+
+        const icon = action === 'PASSED' ? '✅' : action === 'REWRITTEN' ? '✏️ ' : '🚫';
+        console.log(`\n┌${line()}`);
+        console.log(`│ ${icon}  PROCESSOR  →  ${id}  [${action}]`);
+        if (detail) console.log(`│  ${detail}`);
+        console.log(`└${line()}\n`);
+    },
 };
+
