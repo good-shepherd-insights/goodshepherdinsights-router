@@ -1,139 +1,239 @@
 # Fix: OpenClaw Compatibility for Good Shepherd Gateway
 
-OpenClaw sends requests differently than raw curl. Research identified **4 compatibility gaps** that must be addressed.
+OpenClaw sends requests differently than raw curl. Our initial plan contained a flawed architectural approach that reduced all requests to single-turn interactions. This revised plan fixes four compatibility gaps using Mastra-compliant patterns and production-ready code separation.
 
 ---
 
-## Gap Analysis
+## Gap Analysis & Architectural Fixes
 
-### 1. Content Format — `string` vs `object[]`
+### 1. Content Format & Extensibility — `string` vs `object[]`
 
-**Current code** (chat.ts:40):
-```typescript
-const rawPrompt = messages[messages.length - 1]?.content || '';
-```
-
-**curl sends:** `"content": "Hello"`
 **OpenClaw sends:** `"content": [{ "type": "text", "text": "Hello" }]`
+**Current Code receives:** `[object Object]` because it expects a plain string.
 
-Both are valid per the OpenAI spec. The gateway currently receives `[object Object]` from OpenClaw.
-
----
-
-### 2. `developer` Role — Silently Dropped
-
-OpenClaw sends its system prompt (AGENTS.md, SOUL.md, TOOLS.md) using the `developer` role, not `system`. The gateway currently only extracts the **last message's content** and ignores all system/developer context. This means:
-- OpenClaw's personality/instructions are completely lost
-- Only the raw user query reaches the agent
-
-> [!IMPORTANT]
-> Since the gateway injects its **own** persona via the harness strategy system (`CORE_PERSONA` + `HARNESS_DIRECTIVES`), we should **intentionally discard** OpenClaw's `developer`/`system` messages and let the harness own the persona. This is the correct behavior — Eddify has its own identity. However, we must still handle the role gracefully (no crashes, no `[object Object]`).
+**The Fix:** We will implement a robust `extractTextContent` normalizer. However, unlike the previous plan, we will ensure that only the string representation is passed to `harnessRouter.routePayload`, while preserving original message objects (including potential future image/attachment types) for the rest of the array.
 
 ---
 
-### 3. Streaming Response Format — Broken SSE
+### 2. Conversation Context Destruction (Multi-Turn)
 
-**Current code** (chat.ts:46-53):
-```typescript
-const streamResult = await getEddifyAgent().stream(enrichedPrompt);
-return new Response(streamResult.textStream as any, { ... });
-```
+**The Flaw (Badly Designed System):** The original code arbitrarily extracted ONLY the last message's content and discarded the rest of the dialogue history, breaking OpenClaw's ability to maintain a conversation. 
+**The Fix:** Mastra's `Agent.stream` and `Agent.generate` natively accept an array of CoreMessages. We will pass the **entire sanitized conversation array** to Mastra, ensuring Eddify remains multi-turn capable. 
 
-This pipes raw text chunks. **OpenClaw expects** proper OpenAI SSE format:
-```
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"},"index":0}]}\n\n
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}\n\n
-data: [DONE]\n\n
-```
+### 3. Persona Conflict (`developer` / `system` Role)
 
-Without this format, OpenClaw's streaming will break or show nothing.
+OpenClaw sends its system prompt (AGENTS.md, SOUL.md, TOOLS.md) using the `developer` role. 
+**The Flaw:** The previous plan incorrectly assumed the gateway should aggressively overwrite upstream personas and discard `developer`/`system` roles. This is an anti-pattern; gateways should be additive or supplemental, not destructive to the client's context.
+**The Fix:** We will retain **all** messages sent by OpenClaw. The Harness strategy (`harnessRouter`) will act as a supplemental routing layer. Rather than replacing the persona, it will analyze the final user message and append contextual directives to it, ensuring Eddify benefits from both OpenClaw's core identity and the gateway's routing strategies.
 
 ---
 
-### 4. Multiple User Messages — Only Last Extracted
+### 4. Streaming Response Format — Bloated Route Controller
 
-OpenClaw sends full conversation history (multiple `user`/`assistant` turns). The gateway only grabs the last message. This is acceptable for a stateless single-turn agent, but we should extract text correctly from whichever message we pick.
+**The Flaw:** SSE stream generation is currently hardcoded and tightly coupled directly inside the Hono route handler, bloating the controller.
+**The Fix:** OpenClaw expects standard OpenAI SSE (`chat.completion.chunk`). We will use Hono's native `streamSSE` utility to cleanly format and pipe the stream.
 
 ---
 
 ## Proposed Changes
 
-### Chat Route
+### 1. Utilities: Content Normalization and Stream Transport
 
-#### [MODIFY] [chat.ts](file:///Users/dev/Projects/goodshepherdinsights-router/src/routes/chat.ts)
+#### [NEW] [src/routes/utils/chat.utils.ts](file:///Users/dev/Projects/goodshepherdinsights-router/src/routes/utils/chat.utils.ts)
 
-**A) Add content normalizer** (handles string and array-of-objects):
+Create a dedicated utility file to strictly validate and normalize incoming payloads using Zod, and encapsulate Server-Sent Events (SSE) stream formatting. This keeps the Hono controller extremely lightweight and focused strictly on HTTP lifecycle routing, adhering to enterprise separation-of-concerns.
 
 ```typescript
-function extractTextContent(content: unknown): string {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-        return content
-            .filter((part: any) => part.type === 'text')
-            .map((part: any) => part.text)
-            .join('\n');
+import { z } from 'zod';
+import { Context } from 'hono';
+import { streamSSE } from 'hono/streaming';
+import { Agent } from '@mastra/core/agent';
+import { CoreMessage, CoreUserMessage } from 'ai';
+
+// --- 1. Boundary Validation ---
+
+// Define strict schemas for OpenAI-compatible message content
+const TextPartSchema = z.object({
+    type: z.literal('text'),
+    text: z.string()
+});
+
+const MessageContentSchema = z.union([
+    z.string(),
+    z.array(
+        z.union([
+            TextPartSchema,
+            // Pass-through other known or unknown parts (like image_url) without validating their deep structure here
+            z.object({ type: z.string() }).passthrough()
+        ])
+    )
+]);
+
+export function extractTextContent(rawContent: unknown): string {
+    const parsed = MessageContentSchema.safeParse(rawContent);
+    
+    if (!parsed.success) {
+        console.warn(`[Gateway] Invalid message content format detected. Fallback applied.`, parsed.error);
+        return '';
     }
-    return '';
+
+    const content = parsed.data;
+
+    // Handle standard string content
+    if (typeof content === 'string') {
+        return content;
+    }
+
+    // Safely filter and extract text blocks from complex multi-modal arrays
+    return content
+        .filter((part): part is z.infer<typeof TextPartSchema> => part.type === 'text')
+        .map(part => part.text)
+        .join('\n');
+}
+
+/**
+ * Safely mutates the message content to inject the enriched text without destroying 
+ * other multimodal elements (e.g. image URLs) that might exist in an array.
+ */
+export function enrichMessageContent(content: unknown, enrichedText: string): unknown {
+    if (typeof content === 'string') {
+        return enrichedText;
+    } else if (Array.isArray(content)) {
+        const textPart = content.find((p: any) => p.type === 'text');
+        if (textPart) {
+            textPart.text = enrichedText; // Safely overwrite the text block
+        } else {
+            content.push({ type: 'text', text: enrichedText });
+        }
+        return content;
+    }
+    return enrichedText; // Fallback
+}
+
+// --- 2. Output Formatting & Transport ---
+
+/**
+ * Encapsulates the complexity of consuming a Mastra/Vercel AI stream and piping it 
+ * out as a strictly formatted OpenAI Server-Sent Events (SSE) stream using Hono.
+ * Includes error handling for disrupted inference.
+ */
+export async function streamOpenAIResponse(
+    c: Context, 
+    agent: Agent, 
+    messages: CoreMessage[], 
+    model: string
+): Promise<Response> {
+    const streamResult = await agent.stream(messages);
+    const chatId = `chatcmpl-${Date.now()}`;
+    
+    return streamSSE(c, async (stream) => {
+        // Initial chunk (role)
+        await stream.writeSSE({
+            data: JSON.stringify({
+                id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+            })
+        });
+
+        // Content chunks
+        for await (const chunk of streamResult.textStream) {
+            await stream.writeSSE({
+                data: JSON.stringify({
+                    id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+                    choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }]
+                })
+            });
+        }
+
+        // Terminal chunk
+        await stream.writeSSE({
+            data: JSON.stringify({
+                id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+            })
+        });
+        
+        // End of stream
+        await stream.writeSSE({ data: '[DONE]' });
+    }, 
+    // Error Handler for dropped streams
+    async (err, stream) => {
+        console.error('[Gateway] Stream inference failed:', err);
+        await stream.writeSSE({
+            data: JSON.stringify({ error: err.message || 'Stream disrupted' })
+        });
+    });
 }
 ```
 
-**B) Replace raw content extraction** (line 40):
+### 2. Chat Route Handler
+
+#### [MODIFY] [src/routes/chat.ts](file:///Users/dev/Projects/goodshepherdinsights-router/src/routes/chat.ts)
+
+Refactor to process multi-turn message arrays natively, retain all upstream context, and use **Hono's first-party `streamSSE`**.
 
 ```diff
--const rawPrompt = messages[messages.length - 1]?.content || '';
-+// Extract the last user message, skipping developer/system/assistant roles
-+const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
-+const rawPrompt = extractTextContent(lastUserMsg?.content ?? '');
-```
+-import { Hono } from 'hono';
+-import { authenticate } from '../middleware/index.js';
+-import { getEddifyAgent } from '../mastra/index.js';
+-import { harnessRouter } from '../mastra/harness/index.js';
+-import { monitor } from '../monitor/monitor.js';
++import { Hono } from 'hono';
++import { authenticate } from '../middleware/index.js';
++import { getEddifyAgent } from '../mastra/index.js';
++import { harnessRouter } from '../mastra/harness/index.js';
++import { monitor } from '../monitor/monitor.js';
++import { extractTextContent, enrichMessageContent, streamOpenAIResponse } from './utils/chat.utils.js';
+ 
+ const chatRoutes = new Hono();
+ const DEFAULT_MODEL = 'eddify-alpha';
 
-**C) Rewrite streaming to emit proper SSE `chat.completion.chunk`** (lines 45-53):
-
-```typescript
-if (stream) {
-    const streamResult = await getEddifyAgent().stream(enrichedPrompt);
-    const chatId = `chatcmpl-${Date.now()}`;
-    const encoder = new TextEncoder();
-
-    const sseStream = new ReadableStream({
-        async start(controller) {
-            // Initial chunk with role
-            controller.enqueue(encoder.encode(
-                `data: ${JSON.stringify({
-                    id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
-                })}\n\n`
-            ));
-
-            for await (const chunk of streamResult.textStream) {
-                controller.enqueue(encoder.encode(
-                    `data: ${JSON.stringify({
-                        id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
-                        choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }]
-                    })}\n\n`
-                ));
-            }
-
-            // Terminal chunk
-            controller.enqueue(encoder.encode(
-                `data: ${JSON.stringify({
-                    id: chatId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-                })}\n\n`
-            ));
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-            controller.close();
-        }
-    });
-
-    return new Response(sseStream, {
-        headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-        },
-    });
-}
+@@ -39,15 +40,30 @@
+ 
+-        // Extract raw user query from the final message in the conversation
+-        const rawPrompt = messages[messages.length - 1]?.content || '';
+-
+-        // Classify intent and delegate to the appropriate strategy harness
+-        const enrichedPrompt = harnessRouter.routePayload(rawPrompt);
++        // Locate the final user query to apply our internal harness strategy
++        // We DO NOT filter out system/developer messages; OpenClaw's persona is retained.
++        const lastUserMsgIndex = messages.findLastIndex((m: any) => m.role === 'user');
++        if (lastUserMsgIndex !== -1) {
++            const msg = messages[lastUserMsgIndex];
++            const rawPrompt = extractTextContent(msg.content);
++            const enrichedText = harnessRouter.routePayload(rawPrompt);
++            
++            // Provide the strategy harness directives as supplemental context to the user message
++            // PREVENT MULTIMODAL DATA LOSS: Safely inject enriched text without destroying arrays
++            msg.content = enrichMessageContent(msg.content, enrichedText);
++        }
+ 
+-        if (stream) {
+-            const streamResult = await getEddifyAgent().stream(enrichedPrompt);
+-            return new Response(streamResult.textStream as any, {
+-                headers: {
+-                    'Content-Type': 'text/event-stream',
+-                    'Cache-Control': 'no-cache',
+-                    'Connection': 'keep-alive',
+-                },
+-            });
+-        } else {
+-            const result = await getEddifyAgent().generate(enrichedPrompt);
+-            const usage: any = result.usage;
++        try {
++            if (stream) {
++                return await streamOpenAIResponse(c, getEddifyAgent(), messages, model);
++            } else {
++                const result = await getEddifyAgent().generate(messages);
++                const usage: any = result.usage;
++                // ... (rest of non-stream response)
++            }
++        } catch (error: any) {
++            console.error('[Gateway] Inference Error:', error);
++            return c.json({
++                error: { message: error.message || 'Internal Server Error', type: 'server_error', code: 500 }
++            }, 500);
++        }
 ```
 
 ---
@@ -142,8 +242,6 @@ if (stream) {
 
 | Concern | Decision |
 |---|---|
-| OpenClaw `developer`/`system` messages | **Discarded** — Eddify owns its persona via the harness |
-| Conversation history (multi-turn) | **Ignored** — Eddify is stateless single-turn by design |
 | `x-openclaw-agent-id` header | **Not needed** — gateway only serves one model |
 
 ---
@@ -165,13 +263,14 @@ curl https://api.goodshepherdinsights.com/v1/chat/completions \
   -d '{"model":"eddify-alpha","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-**Array content (OpenClaw format):**
+**Array content (OpenClaw format) with Conversation History:**
 ```bash
 curl https://api.goodshepherdinsights.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <KEY>" \
-  -d '{"model":"eddify-alpha","messages":[{"role":"developer","content":"You are helpful"},{"role":"user","content":[{"type":"text","text":"Hello from OpenClaw"}]}]}'
+  -d '{"model":"eddify-alpha","messages":[{"role":"developer","content":"You are helpful"},{"role":"user","content":"Hi my name is John"}, {"role":"assistant","content":"Hello John!"}, {"role":"user","content":[{"type":"text","text":"What is my name?"}]}]}'
 ```
+*Expectation: Response should correctly identify the name "John" due to retained conversation history, proving multi-turn works.*
 
 **Streaming (SSE format):**
 ```bash
@@ -180,5 +279,3 @@ curl -N https://api.goodshepherdinsights.com/v1/chat/completions \
   -H "Authorization: Bearer <KEY>" \
   -d '{"model":"eddify-alpha","messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}],"stream":true}'
 ```
-
-All three should return proper responses without `[object Object]` or malformed SSE.

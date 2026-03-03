@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/index.js';
 import { getEddifyAgent } from '../mastra/index.js';
 import { harnessRouter } from '../mastra/harness/index.js';
 import { monitor } from '../monitor/monitor.js';
+import { extractTextContent, enrichMessageContent, streamOpenAIResponse, normalizeRoles } from './utils/chat.utils.js';
 
 const chatRoutes = new Hono();
 const DEFAULT_MODEL = 'eddify-alpha';
@@ -10,10 +11,10 @@ const DEFAULT_MODEL = 'eddify-alpha';
 chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
     try {
         const body = await c.req.json();
-        const { model = DEFAULT_MODEL, messages, stream = false } = body;
+        const { model = DEFAULT_MODEL, messages: rawMessages, stream = false } = body;
 
         // Validate required fields
-        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        if (!rawMessages || !Array.isArray(rawMessages) || rawMessages.length === 0) {
             return c.json({
                 error: {
                     message: 'Missing or invalid messages array',
@@ -23,6 +24,9 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
                 },
             }, 400);
         }
+
+        // Ensure OpenAI/OpenClaw 'developer' roles are coerced to system for AI SDK
+        const messages = normalizeRoles(rawMessages);
 
         // Force exclusivity to eddify-alpha
         if (model !== 'eddify-alpha') {
@@ -36,23 +40,29 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
             }, 404);
         }
 
-        // Extract raw user query from the final message in the conversation
-        const rawPrompt = messages[messages.length - 1]?.content || '';
+        // Locate the final user query to apply our internal harness strategy
+        // We DO NOT filter out system/developer messages; OpenClaw's persona is retained.
+        let lastUserMsgIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'user') {
+                lastUserMsgIndex = i;
+                break;
+            }
+        }
+        if (lastUserMsgIndex !== -1) {
+            const msg = messages[lastUserMsgIndex];
+            const rawPrompt = extractTextContent(msg.content);
+            const enrichedText = harnessRouter.routePayload(rawPrompt);
 
-        // Classify intent and delegate to the appropriate strategy harness
-        const enrichedPrompt = harnessRouter.routePayload(rawPrompt);
+            // Provide the strategy harness directives as supplemental context to the user message
+            // PREVENT MULTIMODAL DATA LOSS: Safely inject enriched text without destroying arrays
+            msg.content = enrichMessageContent(msg.content, enrichedText);
+        }
 
         if (stream) {
-            const streamResult = await getEddifyAgent().stream(enrichedPrompt);
-            return new Response(streamResult.textStream as any, {
-                headers: {
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                },
-            });
+            return await streamOpenAIResponse(c, getEddifyAgent(), messages, model);
         } else {
-            const result = await getEddifyAgent().generate(enrichedPrompt);
+            const result = await getEddifyAgent().generate(messages);
             const usage: any = result.usage;
 
             monitor.agentOutput(result.text || '', usage);
@@ -78,7 +88,7 @@ chatRoutes.post('/v1/chat/completions', authenticate, async (c) => {
             });
         }
     } catch (error: any) {
-        console.error('Error processing request:', error);
+        console.error('[Gateway] Inference Error:', error);
         return c.json({
             error: {
                 message: error.message || 'Internal server error',
